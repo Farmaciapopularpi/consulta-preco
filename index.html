@@ -230,6 +230,12 @@
       <h3>Campanha</h3>
       <p>Nome que aparece na faixa amarela quando há produtos em promoção.</p>
       <input class="search" id="campName" placeholder="Ex.: Black Friday">
+      <p style="margin:6px 0 6px">Período em que os preços promocionais aparecem para os colaboradores (fora dele, o app mostra o preço normal):</p>
+      <div class="row" style="margin-top:0;margin-bottom:8px">
+        <label style="font-size:12px;color:var(--muted)">Início<input type="date" class="search" id="promoIni" style="margin:4px 0 0"></label>
+        <label style="font-size:12px;color:var(--muted)">Fim<input type="date" class="search" id="promoFim" style="margin:4px 0 0"></label>
+      </div>
+      <p id="promoStatus" style="font-weight:600;color:var(--ink)"></p>
       <button class="bigbtn btn-ghost" style="font-size:14px;padding:12px" id="btnEndPromo">Encerrar promoções (voltar todos ao preço normal)</button>
     </div>
 
@@ -335,13 +341,30 @@ function fromJSON(obj){
     if (!c) continue;
     items[c] = { c: raw, d: String(o.descricao ?? o.d ?? "").trim(), p: parseMoney(o.preco ?? o.p), pp: parseMoney(o.preco_promo ?? o.pp), f: String(o.fabricante ?? o.f ?? "").trim() };
   }
-  return { items, updatedAt: obj.updatedAt || null, campanha: obj.campanha ?? "Black Friday", source:"json" };
+  return { items, updatedAt: obj.updatedAt || null, campanha: obj.campanha ?? "Black Friday", promoInicio: obj.promoInicio || "", promoFim: obj.promoFim || "", source:"json" };
 }
+
+/* Período da campanha: os preços promocionais só valem entre promoInicio e promoFim (horário de Fortaleza) */
+function hojeISO(){
+  try{ return new Date().toLocaleDateString("en-CA", {timeZone:"America/Fortaleza"}); }
+  catch(e){ const d=new Date(Date.now()-3*3600e3); return d.toISOString().slice(0,10); }
+}
+function promoAtiva(){
+  const h = hojeISO();
+  if (DB.promoInicio && h < DB.promoInicio) return false;
+  if (DB.promoFim && h > DB.promoFim) return false;
+  return true;
+}
+function isPromo(i){ return i.pp!=null && (i.p==null || i.pp < i.p) && promoAtiva(); }
+function precoAtual(i){ return isPromo(i) ? i.pp : (i.p ?? i.pp); }
+function fmtData(iso){ if(!iso) return ""; const [y,m,d]=iso.split("-"); return `${d}/${m}/${y}`; }
 
 function toJSON(){
   return {
     loja: "Farmácia Mais Popular",
     campanha: DB.campanha || "",
+    promoInicio: DB.promoInicio || "",
+    promoFim: DB.promoFim || "",
     updatedAt: DB.updatedAt,
     campos: ["codigo","descricao","preco","preco_promo","fabricante"],
     produtos: Object.values(DB.items).sort((a,b)=>a.d.localeCompare(b.d)).map(i => [i.c, i.d, i.p, i.pp ?? null, i.f || ""])
@@ -783,7 +806,7 @@ function showResult(code, item){
       <div class="pcode" style="margin-top:12px">Código: ${esc(code)}</div>
       <div class="nf-box"><b>Produto não encontrado</b>Confira o código ou consulte o preço no sistema da loja.</div>`;
   } else {
-    const hasPromo = item.pp!=null && (item.p==null || item.pp < item.p);
+    const hasPromo = isPromo(item);
     if (hasPromo){
       const pct = item.p ? Math.round((1 - item.pp/item.p)*100) : null;
       body = `
@@ -802,7 +825,7 @@ function showResult(code, item){
         <span class="tag g">Sem promoção</span>
         <div class="pname">${esc(item.d || "Produto sem descrição")}</div>
         <div class="pcode">${item.f ? esc(item.f)+" · " : ""}Código: ${esc(item.c)}</div>
-        <div class="plain"><div class="de" style="color:var(--muted)">Preço</div><div class="price">${priceHTML(item.p ?? item.pp)}</div></div>`;
+        <div class="plain"><div class="de" style="color:var(--muted)">Preço</div><div class="price">${priceHTML(precoAtual(item))}</div></div>`;
     }
   }
   ov.innerHTML = `<div class="sheet" role="dialog">${body}
@@ -824,7 +847,7 @@ function showList(list, q){
     <div class="list" style="max-height:55vh;margin-top:10px">${list.map(i=>`
       <div class="litem" data-k="${esc(normCode(i.c))}" style="cursor:pointer">
         <div class="n">${esc(i.d)}<span class="c">${esc(i.c)}</span></div>
-        <div class="v">${i.pp!=null && i.p!=null && i.pp<i.p ? `<s>${fmt(i.p)}</s>`:""}<b>${fmt(i.pp ?? i.p)}</b></div>
+        <div class="v">${isPromo(i) && i.p!=null ? `<s>${fmt(i.p)}</s>`:""}<b>${fmt(precoAtual(i))}</b></div>
       </div>`).join("")}</div>
     <div class="row"><button class="bigbtn btn-ghost" id="rClose" style="font-size:15px">Fechar</button></div></div>`;
   ov.classList.remove("hidden");
@@ -850,14 +873,14 @@ function renderHist(){
     const it = findCode(h.code);
     const hora = new Date(h.t).toLocaleTimeString("pt-BR",{hour:"2-digit",minute:"2-digit"});
     return it
-      ? `<div class="hitem" data-c="${esc(h.code)}"><div class="n"><b>${esc(it.d||it.c)}</b><span>${esc(it.c)} · ${hora}</span></div><div class="p">${fmt(it.pp ?? it.p)}</div></div>`
+      ? `<div class="hitem" data-c="${esc(h.code)}"><div class="n"><b>${esc(it.d||it.c)}</b><span>${esc(it.c)} · ${hora}</span></div><div class="p">${fmt(precoAtual(it))}</div></div>`
       : `<div class="hitem nf" data-c="${esc(h.code)}"><div class="n"><b>${esc(h.code)}</b><span>${hora}</span></div><div class="p">Não cadastrado</div></div>`;
   }).join("");
   $("hist").querySelectorAll(".hitem").forEach(el => el.onclick = () => showResult(el.dataset.c));
 }
 
 function renderStrip(){
-  const temPromo = Object.values(DB.items).some(i => i.pp!=null && (i.p==null || i.pp<i.p));
+  const temPromo = Object.values(DB.items).some(i => isPromo(i));
   const st = $("strip");
   st.classList.toggle("hidden", !temPromo);
   st.textContent = (DB.campanha || "Promoção") + " · Preços promocionais";
@@ -878,6 +901,11 @@ function renderMeta(){
 function renderAdmin(){
   const all = Object.values(DB.items);
   $("campName").value = DB.campanha || "";
+  $("promoIni").value = DB.promoInicio || "";
+  $("promoFim").value = DB.promoFim || "";
+  $("promoStatus").textContent = (DB.promoInicio || DB.promoFim)
+    ? `Promoções valem ${DB.promoInicio===DB.promoFim ? "só no dia "+fmtData(DB.promoInicio) : "de "+(fmtData(DB.promoInicio)||"…")+" até "+(fmtData(DB.promoFim)||"…")} · hoje: ${promoAtiva() ? "ATIVAS" : "desligadas (mostra preço normal)"}`
+    : "Sem período definido: as promoções valem todos os dias.";
   $("stTotal").textContent = all.length.toLocaleString("pt-BR");
   $("stPromo").textContent = all.filter(i => i.pp!=null && (i.p==null || i.pp<i.p)).length.toLocaleString("pt-BR");
   $("stDate").textContent = DB.updatedAt ? "Última atualização: " + new Date(DB.updatedAt).toLocaleString("pt-BR") + (DB.source==="site" ? " (base do site)" : " (importada neste aparelho)") : "Nenhuma base carregada.";
@@ -973,6 +1001,12 @@ $("btnClear").onclick = () => confirmBox("Apagar a base de produtos salva neste 
 });
 $("adminSearch").oninput = filterAdmin;
 $("campName").onchange = () => { DB.campanha = $("campName").value.trim(); DB.updatedAt = new Date().toISOString(); DB.source="local-import"; saveLocal(); renderStrip(); toast("Nome da campanha salvo. Baixe o produtos.json para publicar."); };
+const savePeriodo = () => {
+  DB.promoInicio = $("promoIni").value; DB.promoFim = $("promoFim").value;
+  DB.updatedAt = new Date().toISOString(); DB.source="local-import"; saveLocal(); renderAdmin(); renderStrip();
+  toast("Período salvo. Baixe o produtos.json para publicar.");
+};
+$("promoIni").onchange = savePeriodo; $("promoFim").onchange = savePeriodo;
 $("btnEndPromo").onclick = () => confirmBox("Tirar o preço promocional de todos os produtos? Os preços normais continuam.", () => {
   for (const i of Object.values(DB.items)) i.pp = null;
   DB.updatedAt = new Date().toISOString(); DB.source="local-import"; saveLocal(); renderAdmin(); renderMeta();
