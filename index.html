@@ -170,6 +170,21 @@
         <input id="lgPass" name="password" type="password" autocomplete="current-password" placeholder="Senha" required>
         <button class="bigbtn btn-red" type="submit">Entrar</button>
         <div id="lgMsg"></div>
+        <p style="text-align:center;margin:14px 0 0">Não tem conta? <a id="lnkSignup" style="color:var(--red);font-weight:700;cursor:pointer">Criar conta</a></p>
+      </form>
+      <form class="panel hidden" id="signupForm" autocomplete="off">
+        <h2>Criar conta</h2>
+        <p>Preencha seus dados. O gerente precisa <b>aprovar</b> antes de você conseguir entrar.</p>
+        <input id="suNome" placeholder="Seu nome completo" required>
+        <input id="suUser" placeholder="Usuário (ex.: maria.silva)" autocapitalize="none" required>
+        <input id="suPass" type="password" placeholder="Senha (mínimo 6 caracteres)" autocomplete="new-password" required>
+        <select id="suLoja" required style="width:100%;padding:14px 16px;border-radius:14px;border:1.5px solid #E3DFD8;font-size:16px;margin-bottom:10px;background:#fff">
+          <option value="">Sua loja…</option><option>Valença</option><option>Novo Oriente</option><option>Pimenteiras</option>
+          <option>Inhuma</option><option>Ipiranga</option><option>Elesbão Veloso</option>
+        </select>
+        <button class="bigbtn btn-red" type="submit">Enviar pedido de cadastro</button>
+        <div id="suMsg"></div>
+        <p style="text-align:center;margin:14px 0 0"><a id="lnkBackLogin" style="color:var(--red);font-weight:700;cursor:pointer">Voltar para entrar</a></p>
       </form>
       <form class="panel hidden" id="firstForm">
         <h2>Primeiro acesso</h2>
@@ -384,7 +399,11 @@ const ERROS = {
   SESSAO_INVALIDA:"Sua sessão foi encerrada. Entre novamente.", SEM_PERMISSAO:"Apenas o gerente pode fazer isso.",
   SENHA_CURTA:"A senha precisa ter pelo menos 6 caracteres.", USUARIO_EXISTE:"Já existe um colaborador com esse usuário.",
   JA_EXISTE_ADMIN:"O administrador já foi criado. Faça login.", NAO_PODE_SE_DESATIVAR:"Você não pode desativar o seu próprio usuário.",
-  BASE_VAZIA:"A base está vazia. Importe a planilha antes de publicar.", SENHA_ATUAL_ERRADA:"A senha atual está errada."
+  BASE_VAZIA:"A base está vazia. Importe a planilha antes de publicar.",
+  AGUARDANDO_APROVACAO:"Seu cadastro ainda está aguardando a aprovação do gerente.",
+  USUARIO_INVALIDO:"Usuário inválido: use de 3 a 30 letras minúsculas, números, ponto, traço ou sublinhado, sem espaço.",
+  NOME_INVALIDO:"Digite seu nome.", SEM_GERENTE:"O app ainda não foi configurado pelo gerente.",
+  MUITOS_PEDIDOS:"Há muitos pedidos de cadastro pendentes. Fale com o gerente.", SENHA_ATUAL_ERRADA:"A senha atual está errada."
 };
 function msgErro(e){ const m = String(e && e.message || e); for (const k in ERROS) if (m.includes(k)) return ERROS[k]; return m.includes("Failed to fetch") ? "Sem internet. Tente de novo." : m; }
 
@@ -418,6 +437,7 @@ async function showLogin(msg){
     const tem = await rpc("tem_colaboradores");
     $("firstForm").classList.toggle("hidden", !!tem);
     $("loginForm").classList.toggle("hidden", !tem);
+    $("signupForm").classList.add("hidden");
   }catch(e){ $("lgMsg").innerHTML = `<div class="msg err">${esc(msgErro(e))}</div>`; }
 }
 
@@ -430,6 +450,8 @@ async function loadDB(){
   try{
     const v = await rpc("get_versao", {p_token: SESSION.token});
     Object.assign(SESSION, {nome:v.nome, loja:v.loja, admin:v.admin}); saveSession(); show("viewScan");
+    setPendentes(v.pendentes || 0);
+    if (v.pendentes > 0) toast(`${v.pendentes} pedido(s) de cadastro aguardando sua aprovação na ⚙️.`);
     if (DB.source === "local-import"){ renderMeta(); return; }   // gerente com alterações ainda não publicadas
     if (!Object.keys(DB.items).length || DB.updatedAt !== v.updatedAt || DB.source !== "nuvem"){
       $("meta").textContent = "Baixando a base de preços…";
@@ -466,6 +488,18 @@ async function doLogin(e){
     await loadDB();
   }catch(err){ $("lgMsg").innerHTML = `<div class="msg err">${esc(msgErro(err))}</div>`; }
 }
+async function doSignup(e){
+  e.preventDefault();
+  $("suMsg").innerHTML = '<div class="msg">Enviando…</div>';
+  try{
+    await rpc("solicitar_cadastro", {p_nome:$("suNome").value, p_usuario:$("suUser").value, p_senha:$("suPass").value, p_loja:$("suLoja").value});
+    const u = $("suUser").value.trim().toLowerCase();
+    $("signupForm").reset();
+    $("suMsg").innerHTML = `<div class="msg ok">✅ Pedido enviado! Seu usuário é <b>${esc(u)}</b>. Avise o gerente para aprovar. Depois é só entrar com seu usuário e senha.</div>`;
+  }catch(err){ $("suMsg").innerHTML = `<div class="msg err">${esc(msgErro(err))}</div>`; }
+}
+function showSignup(on){ $("signupForm").classList.toggle("hidden", !on); $("loginForm").classList.toggle("hidden", on); $("suMsg").innerHTML=""; window.scrollTo(0,0); }
+
 async function doFirstAdmin(e){
   e.preventDefault();
   try{
@@ -476,6 +510,13 @@ async function doFirstAdmin(e){
 async function doLogout(){
   try{ if (SESSION) await rpc("logout", {p_token: SESSION.token}); }catch(e){}
   await wipeLocal(); showLogin();
+}
+
+function setPendentes(n){
+  const b = $("btnAdmin"); b.style.position = "relative";
+  let dot = $("pendDot");
+  if (!dot){ dot = document.createElement("span"); dot.id = "pendDot"; dot.style.cssText = "position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;border-radius:9px;background:#FFC400;color:#A50E13;font-size:11px;font-weight:900;display:grid;place-items:center;padding:0 4px"; b.appendChild(dot); }
+  dot.textContent = n; dot.style.display = n > 0 ? "grid" : "none";
 }
 
 function trocarSenha(){
@@ -519,12 +560,21 @@ async function renderColabs(){
   const box = $("colabList");
   try{
     const list = await rpc("admin_listar_colaboradores", {p_token:SESSION.token});
-    box.innerHTML = list.map(c => `
-      <div class="colab ${c.ativo?"":"off"}">
+    const pend = list.filter(c => !c.aprovado);
+    setPendentes(pend.length);
+    const pendHTML = pend.length ? `<div class="draft" style="margin-bottom:4px">📝 ${pend.length} pedido(s) de cadastro aguardando aprovação</div>` + pend.map(c => `
+      <div class="colab" style="background:#FFF9E6">
+        <div class="n"><b>${esc(c.nome)}</b><span>${esc(c.usuario)} · ${esc(c.loja||"—")} · pediu em ${new Date(c.criado_em).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"})}</span></div>
+        <button class="mini" style="background:var(--ok);color:#fff;border-color:var(--ok)" data-ap="${c.id}" data-ok="1">Aprovar</button>
+        <button class="mini red" data-ap="${c.id}" data-ok="0">Recusar</button>
+      </div>`).join("") : "";
+    box.innerHTML = pendHTML + list.filter(c => c.aprovado).map(c => `
+      <div class="colab ${c.ativo?"":"off"}" style="flex-wrap:wrap">
         <div class="n"><b>${esc(c.nome)} ${c.admin?'<span class="pill-on" style="background:#FFF4CC;color:var(--red-dark)">GERENTE</span>':""}</b>
           <span>${esc(c.usuario)} · ${esc(c.loja||"—")} · ${c.ultimo_acesso ? "último acesso "+new Date(c.ultimo_acesso).toLocaleString("pt-BR",{day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "nunca entrou"}</span></div>
         <span class="${c.ativo?"pill-on":"pill-off"}">${c.ativo?"ATIVO":"DESATIVADO"}</span>
         <button class="mini" data-pw="${c.id}">Senha</button>
+        ${SESSION.usuario !== c.usuario ? `<button class="mini" data-gr="${c.id}" data-on="${c.admin?0:1}">${c.admin?"Tirar gerente":"Tornar gerente"}</button>` : ""}
         ${c.id && SESSION.usuario !== c.usuario ? `<button class="mini ${c.ativo?"red":""}" data-tg="${c.id}" data-on="${c.ativo?0:1}">${c.ativo?"Desativar":"Reativar"}</button>` : ""}
       </div>`).join("") || '<div class="colab">Nenhum colaborador.</div>';
     box.querySelectorAll("[data-tg]").forEach(b => b.onclick = () => {
@@ -535,6 +585,20 @@ async function renderColabs(){
       });
     });
     box.querySelectorAll("[data-pw]").forEach(b => b.onclick = () => novaSenhaColab(+b.dataset.pw));
+    box.querySelectorAll("[data-gr]").forEach(b => b.onclick = () => {
+      const on = b.dataset.on === "1";
+      confirmBox(on ? "Tornar este colaborador gerente? Ele poderá publicar preços e cadastrar/desativar colaboradores." : "Tirar a permissão de gerente deste colaborador?", async () => {
+        try{ await rpc("admin_salvar_colaborador", {p_token:SESSION.token, p_id:+b.dataset.gr, p_nome:null, p_usuario:null, p_senha:null, p_loja:null, p_admin:on, p_ativo:null}); toast(on?"Agora é gerente.":"Não é mais gerente."); renderColabs(); }
+        catch(e){ toast(msgErro(e)); }
+      });
+    });
+    box.querySelectorAll("[data-ap]").forEach(b => b.onclick = () => {
+      const ok = b.dataset.ok === "1";
+      confirmBox(ok ? "Aprovar este cadastro? A pessoa já poderá entrar no app." : "Recusar este pedido? O cadastro será apagado.", async () => {
+        try{ await rpc("admin_aprovar", {p_token:SESSION.token, p_id:+b.dataset.ap, p_aprovar:ok}); toast(ok?"Cadastro aprovado.":"Pedido recusado."); renderColabs(); }
+        catch(e){ toast(msgErro(e)); }
+      });
+    });
   }catch(e){ box.innerHTML = `<div class="msg err">${esc(msgErro(e))}</div>`; }
 }
 function novaSenhaColab(id){
@@ -1184,6 +1248,9 @@ function closeAdmin(){ show("viewScan"); renderMeta(); }
 $("btnAdmin").onclick = () => { if ($("viewAdmin").classList.contains("hidden")) openAdmin(); else closeAdmin(); };
 $("loginForm").onsubmit = doLogin;
 $("firstForm").onsubmit = doFirstAdmin;
+$("signupForm").onsubmit = doSignup;
+$("lnkSignup").onclick = () => showSignup(true);
+$("lnkBackLogin").onclick = () => showSignup(false);
 $("btnPublish").onclick = publicar;
 $("colabForm").onsubmit = cadastrarColab;
 $("btnBack").onclick = closeAdmin;
