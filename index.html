@@ -781,7 +781,7 @@ function showResult(code, item){
     body = `
       <span class="tag g">Não cadastrado</span>
       <div class="pcode" style="margin-top:12px">Código: ${esc(code)}</div>
-      <div class="nf-box"><b>Produto fora da lista da Black Friday</b>Consulte o preço no sistema da loja.</div>`;
+      <div class="nf-box"><b>Produto não encontrado</b>Confira o código ou consulte o preço no sistema da loja.</div>`;
   } else {
     const hasPromo = item.pp!=null && (item.p==null || item.pp < item.p);
     if (hasPromo){
