@@ -210,6 +210,7 @@
       </div>
       <div class="scanbar hidden" id="scanbar">
         <button class="pill" id="btnTorch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 6 6 18M8 2h8l-2 6h-4z"/><path d="M10 8v12a2 2 0 0 0 4 0V8"/></svg>Lanterna</button>
+        <button class="pill hidden" id="btnZoom">🔍 2x</button>
         <button class="pill" id="btnStop"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>Parar</button>
       </div>
     </div>
@@ -343,6 +344,8 @@ const SUPA_URL = "https://htarbhgkmdrxgbtztile.supabase.co";     // endereço do
 const SUPA_KEY = "sb_publishable_kt0Efw26Cs0oiiZhAhHgVA_LEUZm6WY";     // chave pública (anon) do Supabase
 const LS_TOKEN = "fmp_sessao_v1";
 const ZXING_URL = "https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js";
+const BD_POLY_URL = "https://cdn.jsdelivr.net/npm/barcode-detector@3.2.4/dist/iife/ponyfill.js";
+const IS_IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
 const LS_KEY = "fmp_bf_db_v1", LS_HIST = "fmp_bf_hist_v1";
 
 /* =========================================================
@@ -919,7 +922,7 @@ function downloadBlob(content, filename, type){
 /* =========================================================
    LEITOR DE CÓDIGO DE BARRAS
    ========================================================= */
-let stream = null, detector = null, zxReader = null, scanning = false, loopTimer = null, torchOn = false;
+let stream = null, detector = null, zxReader = null, scanning = false, loopTimer = null, torchOn = false, detectorPoly = false, zoomInfo = null;
 let lastHit = {code:null, t:0};
 const FORMATS = ["ean_13","ean_8","upc_a","upc_e","code_128","code_39","itf","codabar"];
 
@@ -944,6 +947,16 @@ async function getDetector(){
       if (f.length){ detector = new BarcodeDetector({formats:f}); return detector; }
     }catch(e){}
   }
+  // iPhone/Safari não tem leitor nativo: usa o leitor ZXing-C++ (WebAssembly), bem mais preciso
+  try{
+    if (!window.BarcodeDetectionAPI) await loadScript(BD_POLY_URL);
+    const BD = window.BarcodeDetectionAPI.BarcodeDetector;
+    detector = new BD({formats:FORMATS});
+    const c0 = document.createElement("canvas"); c0.width = c0.height = 8;
+    await detector.detect(c0);        // já carrega o motor de leitura (se falhar, usa o leitor antigo)
+    detectorPoly = true;
+    return detector;
+  }catch(e){ detector = null; }
   return null;
 }
 
@@ -979,17 +992,31 @@ async function startScan(){
     if (det){
       stream = await navigator.mediaDevices.getUserMedia({audio:false, video:{facingMode:{ideal:"environment"}, width:{ideal:1920}, height:{ideal:1080}}});
       video.srcObject = stream;
+      video.setAttribute("playsinline",""); video.muted = true;
       await video.play();
       setScanUI(true);
+      await tuneCamera();
+      const cv = document.createElement("canvas"), cx = cv.getContext("2d", {willReadFrequently:true});
+      let n = 0;
       const tick = async () => {
         if (!scanning) return;
         try{
-          if (video.readyState >= 2){
-            const codes = await det.detect(video);
+          if (video.readyState >= 2 && video.videoWidth){
+            let src = video;
+            // a cada 3 leituras, 2 são só na faixa central (onde fica a moldura): código pequeno fica maior e lê mais rápido
+            if (detectorPoly && (n++ % 3) !== 2){
+              const vw = video.videoWidth, vh = video.videoHeight;
+              const w = Math.round(vw*0.9), h = Math.round(vh*0.5);
+              const sx = Math.round((vw-w)/2), sy = Math.round((vh-h)/2);
+              if (cv.width !== w || cv.height !== h){ cv.width = w; cv.height = h; }
+              cx.drawImage(video, sx, sy, w, h, 0, 0, w, h);
+              src = cv;
+            }
+            const codes = await det.detect(src);
             if (codes && codes.length) onCode(codes[0].rawValue);
           }
         }catch(e){}
-        loopTimer = setTimeout(tick, 120);
+        loopTimer = setTimeout(tick, detectorPoly ? 40 : 120);
       };
       tick();
     } else {
@@ -1018,6 +1045,30 @@ function stopScan(){
   $("video").srcObject = null;
   torchOn = false;
   setScanUI(false);
+}
+
+async function tuneCamera(){
+  const track = stream && stream.getVideoTracks && stream.getVideoTracks()[0];
+  zoomInfo = null; $("btnZoom").classList.add("hidden");
+  if (!track) return;
+  let caps = {};
+  try{ caps = track.getCapabilities ? track.getCapabilities() : {}; }catch(e){}
+  try{ if (caps.focusMode && caps.focusMode.includes("continuous")) await track.applyConstraints({advanced:[{focusMode:"continuous"}]}); }catch(e){}
+  if (caps.zoom && caps.zoom.max >= 1.5){
+    const z2 = Math.min(2, caps.zoom.max);
+    zoomInfo = {track, z1: Math.max(1, caps.zoom.min || 1), z2, on:false};
+    $("btnZoom").classList.remove("hidden");
+    // No iPhone a câmera não foca muito perto: com zoom 2x dá pra ler de mais longe, com foco
+    if (IS_IOS) await setZoom(true);
+  }
+}
+async function setZoom(on){
+  if (!zoomInfo) return;
+  try{
+    await zoomInfo.track.applyConstraints({advanced:[{zoom: on ? zoomInfo.z2 : zoomInfo.z1}]});
+    zoomInfo.on = on;
+    $("btnZoom").textContent = on ? "🔍 1x" : "🔍 2x";
+  }catch(e){}
 }
 
 function setupTorch(){
@@ -1257,6 +1308,9 @@ $("btnBack").onclick = closeAdmin;
 $("btnScan").onclick = startScan;
 $("btnStop").onclick = stopScan;
 $("btnTorch").onclick = toggleTorch;
+$("btnZoom").onclick = () => setZoom(!(zoomInfo && zoomInfo.on));
+// já deixa o leitor carregado em segundo plano, pra primeira leitura ser rápida
+setTimeout(() => { getDetector().catch(()=>{}); }, 2500);
 $("photoInput").onchange = e => { scanPhoto(e.target.files[0]); e.target.value = ""; };
 
 $("manualForm").onsubmit = e => {
