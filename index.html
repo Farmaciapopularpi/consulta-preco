@@ -205,6 +205,7 @@
       </div>
       <div style="margin-top:12px;font-size:13px;color:var(--ink);display:flex;flex-direction:column;gap:8px">
         <label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="impMode" value="base" checked> <span><b>Base geral de preços</b> (relatório do Linx). Substitui os preços normais e mantém as promoções.</span></label>
+        <label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="impMode" value="alter"> <span><b>Alteração de preços</b> (só os produtos que mudaram de preço). Atualiza esses produtos e não mexe no resto da base.</span></label>
         <label style="display:flex;gap:8px;align-items:flex-start"><input type="radio" name="impMode" value="promo"> <span><b>Lista de promoção</b> (planilha com preco_promo). Só acrescenta os preços promocionais.</span></label>
       </div>
       <div id="importMsg"></div>
@@ -372,7 +373,7 @@ function detectColumns(headers){
   };
   const code  = find(["codigo de barras","cod barras","barra","ean","gtin","codigo","cod"], ["interno"]);
   const promo = find(["preco promo","promo","black","oferta","bf","por","desconto"], ["%","percent"]);
-  const price = find(["preco normal","valor normal","preco de","preco venda","preco","valor","pmc","de"], ["promo","black","oferta","%"]);
+  const price = find(["preco normal","valor normal","preco de","preco venda","pco venda","preco","pco","venda","valor","pmc","de"], ["promo","black","oferta","%"]);
   const desc  = find(["descricao","produto","nome","item"]);
   const fab   = find(["fabricante","fabric","laboratorio","lab","marca","fornecedor"]);
   return {code, desc, price, promo, fab};
@@ -465,7 +466,31 @@ async function pdfToLines(file, onProgress){
   return out;
 }
 
+function diffReport(oldItems, newItems){
+  const rep = {changed:[], added:[], same:0, promoConflict:[]};
+  for (const [k,n] of Object.entries(newItems)){
+    const o = oldItems[k];
+    if (!o){ rep.added.push({c:n.c, d:n.d, p:n.p}); continue; }
+    if (n.p != null && o.p !== n.p){
+      rep.changed.push({c:n.c, d:n.d || o.d, old:o.p, now:n.p});
+      if (o.pp != null && n.p <= o.pp) rep.promoConflict.push({c:n.c, d:n.d || o.d, p:n.p, pp:o.pp});
+    } else rep.same++;
+  }
+  return rep;
+}
+
 function applyImport(newItems, mode){
+  const report = diffReport(DB.items, newItems);
+  if (mode === "alter"){
+    // alteração de preços: atualiza só os produtos do arquivo, sem apagar os outros e mantendo promoções
+    const base = Object.assign({}, DB.items);
+    for (const [k,n] of Object.entries(newItems)){
+      const o = base[k];
+      base[k] = o ? { c:o.c||n.c, d:n.d||o.d, p:(n.p ?? o.p), pp:o.pp, f:n.f||o.f||"" } : { c:n.c, d:n.d, p:n.p, pp:n.pp ?? null, f:n.f||"" };
+    }
+    DB.items = base;
+    return report;
+  }
   if (mode === "promo"){
     // lista de promoção: grava o preço promocional por cima da base, sem apagar nada
     const base = Object.assign({}, DB.items);
@@ -477,6 +502,7 @@ function applyImport(newItems, mode){
     }
     if (semPromo === Object.keys(newItems).length) throw new Error("Esse arquivo não tem coluna de preço promocional (preco_promo / Por).");
     DB.items = base;
+    return null;
   } else {
     // base geral: substitui os preços normais e mantém as promoções já cadastradas
     const base = {};
@@ -486,7 +512,20 @@ function applyImport(newItems, mode){
     }
     for (const [k,o] of Object.entries(DB.items)) if (!base[k] && o.pp != null) base[k] = o;  // promo sem estoque nesta base continua
     DB.items = base;
+    return report;
   }
+}
+
+function reportHTML(r){
+  if (!r) return "";
+  const row = x => `<div class="litem"><div class="n">${esc(x.d||"(sem descrição)")}<span class="c">${esc(x.c)}</span></div><div class="v"><s>${fmt(x.old)}</s><b style="color:${x.now>x.old?'var(--red)':'var(--ok)'}">${x.now>x.old?'▲':'▼'} ${fmt(x.now)}</b></div></div>`;
+  let h = `<div class="stat" style="margin-top:12px"><div><b>${r.changed.length}</b><span>preços alterados</span></div><div><b>${r.added.length}</b><span>produtos novos</span></div><div><b>${r.same}</b><span>sem mudança</span></div></div>`;
+  if (r.promoConflict.length) h += `<div class="msg err">⚠️ ${r.promoConflict.length} produto(s) ficaram com preço normal igual ou menor que o promocional e vão aparecer sem promoção: ${r.promoConflict.slice(0,5).map(x=>esc(x.d)).join(", ")}${r.promoConflict.length>5?"…":""}</div>`;
+  if (r.changed.length){
+    h += `<div class="section-title" style="margin-top:14px">Preços alterados</div><div class="list" id="chgList">${r.changed.slice(0,300).map(row).join("")}${r.changed.length>300?`<div class="litem" style="justify-content:center;color:var(--muted)">+ ${r.changed.length-300}…</div>`:""}</div>`;
+    h += `<button class="bigbtn btn-ghost" style="font-size:14px;padding:12px;margin-top:10px" id="btnCopyChg">Copiar lista de alterações</button>`;
+  }
+  return h;
 }
 
 async function importFile(file){
@@ -520,12 +559,18 @@ async function importFile(file){
     const n = Object.keys(result.items).length;
     if (!n) throw new Error("Nenhum produto com código de barras foi encontrado no arquivo.");
     const mode = document.querySelector('input[name="impMode"]:checked').value;
-    applyImport(result.items, mode);
+    const report = applyImport(result.items, mode);
     DB.updatedAt = new Date().toISOString();
     DB.source = "local-import";
     saveLocal();
     renderAdmin(); renderMeta();
-    msg.innerHTML = `<div class="msg ok">✅ ${n.toLocaleString("pt-BR")} produtos lidos como <b>${mode==="promo"?"lista de promoção":"base geral"}</b>${result.skipped?` · ${result.skipped} linhas sem código ignoradas`:""}. A base agora tem ${Object.keys(DB.items).length.toLocaleString("pt-BR")} produtos. Baixe o <b>produtos.json</b> para publicar.</div>`;
+    const modeName = {promo:"lista de promoção", alter:"alteração de preços", base:"base geral"}[mode];
+    msg.innerHTML = `<div class="msg ok">✅ ${n.toLocaleString("pt-BR")} produtos lidos como <b>${modeName}</b>${result.skipped?` · ${result.skipped} linhas sem código ignoradas`:""}. A base agora tem ${Object.keys(DB.items).length.toLocaleString("pt-BR")} produtos. Baixe o <b>produtos.json</b> para publicar.</div>` + reportHTML(report);
+    const bc = $("btnCopyChg");
+    if (bc) bc.onclick = async () => {
+      const txt = "PRODUTO;CODIGO;PRECO ANTERIOR;PRECO NOVO\n" + report.changed.map(x => `${x.d};${x.c};${(x.old??0).toFixed(2).replace(".",",")};${x.now.toFixed(2).replace(".",",")}`).join("\n");
+      try{ await navigator.clipboard.writeText(txt); toast("Lista copiada. Cole no Excel ou no WhatsApp."); }catch(e){ toast("Não consegui copiar neste navegador."); }
+    };
   }catch(e){
     msg.innerHTML = `<div class="msg err">⚠️ ${e.message}</div>`;
   }
